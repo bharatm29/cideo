@@ -174,7 +174,6 @@ int main(int argc, char **argv) {
     size_t frame_size = (1LL * width * height * 4);
     uint8_t *buf = malloc(sizeof(uint8_t) * frame_size);
 
-
     InitWindow(width, height, FILENAME);
     SetTargetFPS(MIN(MAX_FRAME_RATE, frame_rate)); // clamp to MAX_FRAME_RATE
 
@@ -195,6 +194,11 @@ int main(int argc, char **argv) {
     while (!WindowShouldClose()) {
         if (IsKeyPressed(KEY_SPACE)) {
             playing = !playing;
+            if (playing) {
+                ResumeAudioStream(stream);
+            } else {
+                PauseAudioStream(stream);
+            }
         }
 
         if (!ended && playing) {
