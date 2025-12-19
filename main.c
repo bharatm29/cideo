@@ -11,6 +11,7 @@
 #define SCREEN_WIDTH 1920
 #define SCREEN_HEIGHT 1200
 #define MAX_FRAME_RATE 60
+#define MAX_SAMPLES_PER_UPDATE 4096
 
 #define PROGRESS_RED GetColor(0xFF5C5CFF)
 
@@ -88,12 +89,36 @@ int get_frame_rate(char *fstr) {
     return ceil(a / (1.f * b));
 }
 
+int ffaudio;
+int channels;
+void AudioInputCallback(void *buffer, unsigned int frames) {
+    ssize_t n = read(ffaudio, buffer, frames * channels * 2);
+    if (n <= 0) {
+        memset(buffer, 0, frames * channels * 2);
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         printf("cideo [FILE]\n");
         exit(EXIT_FAILURE);
     }
     char *const FILENAME = argv[1];
+
+    // audio
+    int sample_rate = 44100;
+    channels = 2;
+    int bytePerSample = 2; // using s16le
+
+    char *ffmpeg_audio_command[] = {
+        "ffmpeg", "-v",    "error",   "-loglevel", "quiet", "-i", FILENAME,
+        "-vn", // disable video
+        "-f",     "s16le", "-acodec", "pcm_s16le", "pipe:1"};
+
+    ffaudio = fork_and_execute(ffmpeg_audio_command, false);
+    ssize_t audioBytes =
+        sizeof(uint8_t) * 2 * channels * MAX_SAMPLES_PER_UPDATE;
+    uint8_t *audio_buf = malloc(audioBytes);
 
     char *dimensions_command[] = {"ffprobe",
                                   "-v",
@@ -146,13 +171,21 @@ int main(int argc, char **argv) {
                               "rgba",        "pipe:1", NULL};
 
     int ffmpeg = fork_and_execute(ffmpeg_command, false);
-
     size_t frame_size = (1LL * width * height * 4);
     uint8_t *buf = malloc(sizeof(uint8_t) * frame_size);
 
-    SetTraceLogLevel(LOG_ERROR); // Only log errors
+
     InitWindow(width, height, FILENAME);
     SetTargetFPS(MIN(MAX_FRAME_RATE, frame_rate)); // clamp to MAX_FRAME_RATE
+
+    InitAudioDevice();
+
+    SetAudioStreamBufferSizeDefault(MAX_SAMPLES_PER_UPDATE);
+
+    AudioStream stream = LoadAudioStream(sample_rate, 16, channels);
+    SetAudioStreamCallback(stream, AudioInputCallback);
+    SetAudioStreamVolume(stream, 0.5f);
+    PlayAudioStream(stream);
 
     Texture tex = LoadTextureFromImage(GenImageColor(width, height, BLACK));
 
@@ -202,7 +235,10 @@ int main(int argc, char **argv) {
     }
 
     free(buf);
+    close(ffaudio);
     close(ffmpeg);
     UnloadTexture(tex);
+    UnloadAudioStream(stream);
+    CloseAudioDevice();
     CloseWindow();
 }
