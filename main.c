@@ -1,11 +1,20 @@
 #include <math.h>
 #include <raylib.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
+#define MAX(a, b) (((a) > (b)) ? (a) : (b))
+#define SCREEN_WIDTH 1920
+#define SCREEN_HEIGHT 1200
+#define MAX_FRAME_RATE 60
+
+#define PROGRESS_RED GetColor(0xFF5C5CFF)
+
+typedef unsigned char uint8_t; // #include <stdint.h>
 
 // modifies buf
 ssize_t extract_frame(int fd, uint8_t *buf, size_t frame_size) {
@@ -64,13 +73,19 @@ int fork_and_execute(char **command, bool wait) {
 int get_frame_rate(char *fstr) {
     char *cur = fstr;
 
-    // since frame rate comes in format like: 60/1
-    while (*++cur != '/')
-        ;
+    // since frame rate comes in format like: 24000/1001 =>
+    int a = 0;
+    int b = 0;
+
+    while (*cur != '/') {
+        cur++;
+    }
 
     *cur = '\0';
+    a = strtol(fstr, NULL, 10);
+    b = strtol(++cur, NULL, 10);
 
-    return ceil(strtod(fstr, NULL));
+    return ceil(a / (1.f * b));
 }
 
 int main(int argc, char **argv) {
@@ -109,21 +124,37 @@ int main(int argc, char **argv) {
     int frame_rate = get_frame_rate(strtok(NULL, ","));
     float duration = strtod(strtok(NULL, ","), NULL);
 
-    char *ffmpeg_command[] = {
-        "ffmpeg", "-v",       "error",    "-loglevel", "quiet",  "-i", FILENAME,
-        "-f",     "rawvideo", "-pix_fmt", "rgba",      "pipe:1", NULL};
+    // clamp width to fit to screen
+    float scaleFactor =
+        MIN((float)SCREEN_WIDTH / width, (float)SCREEN_HEIGHT / height);
+
+    // NOTE: following allows cropping to fill screen without keeping aspect
+    // ratio
+    // width = MIN(SCREEN_WIDTH, width * SCREEN_HEIGHT / height);
+    // height = MIN(SCREEN_HEIGHT, height * SCREEN_WIDTH / width);
+
+    // scales it to ensure it fits in screen width and height while keeping
+    // aspect ratio
+    width *= scaleFactor;
+    height *= scaleFactor;
+
+    const char *scale = TextFormat("scale=%d:%d", width, height);
+
+    char *ffmpeg_command[] = {"ffmpeg",      "-v",     "error",    "-loglevel",
+                              "quiet",       "-i",     FILENAME,   "-vf",
+                              (char *)scale, "-f",     "rawvideo", "-pix_fmt",
+                              "rgba",        "pipe:1", NULL};
 
     int ffmpeg = fork_and_execute(ffmpeg_command, false);
 
     size_t frame_size = (1LL * width * height * 4);
     uint8_t *buf = malloc(sizeof(uint8_t) * frame_size);
 
-    SetTraceLogLevel(LOG_ERROR);
-    InitWindow(width, height, "Frames");
-    SetTargetFPS(frame_rate);
+    SetTraceLogLevel(LOG_ERROR); // Only log errors
+    InitWindow(width, height, FILENAME);
+    SetTargetFPS(MIN(MAX_FRAME_RATE, frame_rate)); // clamp to MAX_FRAME_RATE
 
     Texture tex = LoadTextureFromImage(GenImageColor(width, height, BLACK));
-    UpdateTexture(tex, buf);
 
     bool playing = true;
     bool ended = false;
@@ -142,24 +173,30 @@ int main(int argc, char **argv) {
         }
 
         BeginDrawing();
-        ClearBackground(BLACK);
-        DrawTexture(tex, 0, 0, WHITE);
-        float current_time = frame_number / (1.f * frame_rate);
-        if (current_time > duration)
-            current_time = duration; // clamping just in case
 
-        float percent = current_time / duration * 100;
-        int pad = 40;
-        int lineHeight = height - pad;
-        DrawLineEx((Vector2){0, lineHeight}, (Vector2){width, lineHeight}, 6.0f,
-                   GRAY);
+        DrawTexture(tex, 0, 0, WHITE);
+
+        const float current_time =
+            MIN(duration, frame_number / (1.f * frame_rate));
+        const float percent = current_time / duration * 100;
+
+        // draw the progress bar
+        const int lineThickness = 3;
+        const int globRadius = 5;
+        const int pad = 40;
+        const int lineHeight = height - pad;
+        DrawLineEx((Vector2){0, lineHeight}, (Vector2){width, lineHeight},
+                   lineThickness, GRAY);
         DrawLineEx((Vector2){0, lineHeight},
-                   (Vector2){width * (percent / 100), lineHeight}, 6.0f, RED);
-        DrawCircle(width * (percent / 100), lineHeight, 5, RED);
+                   (Vector2){width * (percent / 100), lineHeight},
+                   lineThickness, PROGRESS_RED);
+        DrawCircle(width * (percent / 100), lineHeight, globRadius,
+                   PROGRESS_RED);
 
         const char *time = TextFormat("%.2f/%.2f", current_time, duration);
-        int textPad = pad + 5 + MeasureTextEx(GetFontDefault(), time, 20, 0).y;
-        DrawText(time, 10, height - textPad, 20, RED);
+        const int textPad =
+            pad + 5 + MeasureTextEx(GetFontDefault(), time, 20, 0).y;
+        DrawText(time, 10, height - textPad, 20, PROGRESS_RED);
 
         EndDrawing();
     }
