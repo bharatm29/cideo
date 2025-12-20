@@ -19,6 +19,18 @@
 
 #define PROGRESS_RED GetColor(0xFF5C5CFF)
 
+const char* format_time(int seconds) {
+    int hours = seconds / 3600;
+    int minutes = (seconds / 60) % 60;
+    seconds %= 60;
+
+    if (hours == 0) {
+        return TextFormat("%02d:%02d", minutes, seconds);
+    } else {
+        return TextFormat("%02d:%02d:%02d", hours, minutes, seconds);
+    }
+}
+
 typedef unsigned char uint8_t; // #include <stdint.h>
 
 // modifies buf
@@ -281,7 +293,7 @@ int main(int argc, char **argv) {
         DrawCircle(width * (percent / 100), lineHeight, globRadius,
                    PROGRESS_RED);
 
-        const char *time = TextFormat("%.2f/%.2f", current_time, duration);
+        const char *time = TextFormat("%s/%s", format_time(current_time), format_time(duration));
         const int textPad =
             pad + 5 + MeasureTextEx(GetFontDefault(), time, 20, 0).y;
         DrawText(time, 10, height - textPad, 20, PROGRESS_RED);
