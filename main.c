@@ -90,7 +90,7 @@ int get_frame_rate(char *fstr) {
     return ceil(a / (1.f * b));
 }
 
-int ffaudio; // lateinit in @main
+int ffaudio;  // lateinit in @main
 int channels; // lateinit in @main
 int total_frames = 0;
 void AudioInputCallback(void *buffer, unsigned int frames) {
@@ -108,21 +108,6 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
     char *const FILENAME = argv[1];
-
-    // audio
-    int sample_rate = 44100;
-    channels = 2;
-    int bytePerSample = 2; // using s16le
-
-    char *ffmpeg_audio_command[] = {
-        "ffmpeg", "-v",    "error",   "-loglevel", "quiet", "-i", FILENAME,
-        "-vn", // disable video
-        "-f",     "s16le", "-acodec", "pcm_s16le", "pipe:1"};
-
-    ffaudio = fork_and_execute(ffmpeg_audio_command, false);
-    // ssize_t audioBytes =
-    //     sizeof(uint8_t) * 2 * channels * MAX_SAMPLES_PER_UPDATE;
-    // uint8_t *audio_buf = malloc(audioBytes);
 
     char *dimensions_command[] = {"ffprobe",
                                   "-v",
@@ -169,14 +154,26 @@ int main(int argc, char **argv) {
 
     const char *scale = TextFormat("scale=%d:%d", width, height);
 
-    char *ffmpeg_command[] = {"ffmpeg",      "-v",     "error",    "-loglevel",
-                              "quiet",       "-i",     FILENAME,   "-vf",
-                              (char *)scale, "-f",     "rawvideo", "-pix_fmt",
-                              "rgba",        "pipe:1", NULL};
+    char *ffmpeg_command[] = {
+        "ffmpeg", "-v",      "error",       "-loglevel", "quiet",    "-i",
+        FILENAME, "-vf",     (char *)scale, "-f",        "rawvideo", "-pix_fmt",
+        "rgba",   "-fflags", "+nobuffer",   "pipe:1",    NULL};
 
     int ffmpeg = fork_and_execute(ffmpeg_command, false);
     size_t frame_size = (1LL * width * height * 4);
     uint8_t *buf = malloc(sizeof(uint8_t) * frame_size);
+
+    // audio
+    int sample_rate = 44100;
+    channels = 2;
+    int bytePerSample = 2; // using s16le
+
+    char *ffmpeg_audio_command[] = {
+        "ffmpeg",  "-v",        "error",   "-loglevel", "quiet",
+        "-i",      FILENAME,    "-vn",     "-f",        "s16le",
+        "-acodec", "pcm_s16le", "-fflags", "+nobuffer", "pipe:1"};
+
+    ffaudio = fork_and_execute(ffmpeg_audio_command, false);
 
     InitWindow(width, height, FILENAME);
     SetTargetFPS(MIN(MAX_FRAME_RATE, frame_rate)); // clamp to MAX_FRAME_RATE
@@ -205,7 +202,8 @@ int main(int argc, char **argv) {
             }
         }
 
-        const double current_time = MIN(duration, frame_number / (1.f * frame_rate));
+        const double current_time =
+            MIN(duration, frame_number / (1.f * frame_rate));
         const double audio_time = (double)total_frames / sample_rate;
         const double diff = current_time - audio_time;
         const double thresh = 1.0 / frame_rate;
@@ -216,9 +214,11 @@ int main(int argc, char **argv) {
                 // this way we match video with audio as the main clock
 
                 // int expected = audio_time * frame_rate;
-                int expected = (int)round(audio_time * frame_rate); // NOTE: Optionally round to nearest integer
+                int expected = (int)round(
+                    audio_time *
+                    frame_rate); // NOTE: Optionally round to nearest integer
                 PauseAudioStream(stream);
-                for(int i = frame_number; i <= expected; i++) {
+                for (int i = frame_number; i <= expected; i++) {
                     if (!extract_frame(ffmpeg, buf, frame_size)) {
                         ended = true;
                         break;
