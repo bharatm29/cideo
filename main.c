@@ -14,6 +14,9 @@
 #define MAX_FRAME_RATE 60
 #define MAX_SAMPLES_PER_UPDATE 4096
 
+// using s16le which is 2 byte per sample
+#define bytePerSample 2
+
 #define PROGRESS_RED GetColor(0xFF5C5CFF)
 
 typedef unsigned char uint8_t; // #include <stdint.h>
@@ -94,11 +97,11 @@ int ffaudio;  // lateinit in @main
 int channels; // lateinit in @main
 int total_frames = 0;
 void AudioInputCallback(void *buffer, unsigned int frames) {
-    ssize_t n = read(ffaudio, buffer, frames * channels * 2);
+    ssize_t n = read(ffaudio, buffer, frames * channels * bytePerSample);
     if (n <= 0) {
-        memset(buffer, 0, frames * channels * 2);
+        memset(buffer, 0, frames * channels * bytePerSample);
     } else {
-        total_frames += n / (channels * 2);
+        total_frames += n / (channels * bytePerSample);
     }
 }
 
@@ -136,6 +139,7 @@ int main(int argc, char **argv) {
     int width = strtol(strtok((char *)dimension, ","), NULL, 10);
     int height = strtol(strtok(NULL, ","), NULL, 10);
     int frame_rate = get_frame_rate(strtok(NULL, ","));
+    frame_rate = MIN(frame_rate, MAX_FRAME_RATE);
     float duration = strtod(strtok(NULL, ","), NULL);
 
     // clamp width to fit to screen
@@ -152,7 +156,8 @@ int main(int argc, char **argv) {
     width *= scaleFactor;
     height *= scaleFactor;
 
-    const char *scale = TextFormat("scale=%d:%d", width, height);
+    const char *scale =
+        TextFormat("fps=%d,scale=%d:%d", frame_rate, width, height);
 
     char *ffmpeg_command[] = {
         "ffmpeg", "-v",      "error",       "-loglevel", "quiet",    "-i",
@@ -163,10 +168,31 @@ int main(int argc, char **argv) {
     size_t frame_size = (1LL * width * height * 4);
     uint8_t *buf = malloc(sizeof(uint8_t) * frame_size);
 
+    char *audio_dimensions_command[] = {"ffprobe",
+                                        "-v",
+                                        "error",
+                                        "-select_streams",
+                                        "a",
+                                        "-show_entries",
+                                        "stream=sample_rate,channels",
+                                        "-of",
+                                        "csv=p=0",
+                                        FILENAME,
+                                        NULL};
+
+    ffprobe = fork_and_execute(audio_dimensions_command, true);
+
+    uint8_t audio_dimension[64] = {0};
+    if (!(n = read(ffprobe, audio_dimension, 64))) {
+        perror("read");
+        exit(EXIT_FAILURE);
+    }
+    close(ffprobe);
+    audio_dimension[n - 1] = '\0';
+
     // audio
-    int sample_rate = 44100;
-    channels = 2;
-    int bytePerSample = 2; // using s16le
+    int sample_rate = strtol(strtok((char *)audio_dimension, ","), NULL, 10);
+    channels = strtol(strtok(NULL, ","), NULL, 10);
 
     char *ffmpeg_audio_command[] = {
         "ffmpeg",  "-v",        "error",   "-loglevel", "quiet",
@@ -175,6 +201,7 @@ int main(int argc, char **argv) {
 
     ffaudio = fork_and_execute(ffmpeg_audio_command, false);
 
+    SetTraceLogLevel(LOG_ERROR);
     InitWindow(width, height, FILENAME);
     SetTargetFPS(MIN(MAX_FRAME_RATE, frame_rate)); // clamp to MAX_FRAME_RATE
 
@@ -214,9 +241,8 @@ int main(int argc, char **argv) {
                 // this way we match video with audio as the main clock
 
                 // int expected = audio_time * frame_rate;
-                int expected = (int)round(
-                    audio_time *
-                    frame_rate); // NOTE: Optionally round to nearest integer
+                // NOTE: Optionally round to nearest integer
+                int expected = (int)round(audio_time * frame_rate);
                 PauseAudioStream(stream);
                 for (int i = frame_number; i <= expected; i++) {
                     if (!extract_frame(ffmpeg, buf, frame_size)) {
