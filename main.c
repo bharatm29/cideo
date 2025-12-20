@@ -1,5 +1,6 @@
 #include <math.h>
 #include <raylib.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -89,12 +90,15 @@ int get_frame_rate(char *fstr) {
     return ceil(a / (1.f * b));
 }
 
-int ffaudio;
-int channels;
+int ffaudio; // lateinit in @main
+int channels; // lateinit in @main
+int total_frames = 0;
 void AudioInputCallback(void *buffer, unsigned int frames) {
     ssize_t n = read(ffaudio, buffer, frames * channels * 2);
     if (n <= 0) {
         memset(buffer, 0, frames * channels * 2);
+    } else {
+        total_frames += n / (channels * 2);
     }
 }
 
@@ -116,9 +120,9 @@ int main(int argc, char **argv) {
         "-f",     "s16le", "-acodec", "pcm_s16le", "pipe:1"};
 
     ffaudio = fork_and_execute(ffmpeg_audio_command, false);
-    ssize_t audioBytes =
-        sizeof(uint8_t) * 2 * channels * MAX_SAMPLES_PER_UPDATE;
-    uint8_t *audio_buf = malloc(audioBytes);
+    // ssize_t audioBytes =
+    //     sizeof(uint8_t) * 2 * channels * MAX_SAMPLES_PER_UPDATE;
+    // uint8_t *audio_buf = malloc(audioBytes);
 
     char *dimensions_command[] = {"ffprobe",
                                   "-v",
@@ -190,7 +194,7 @@ int main(int argc, char **argv) {
 
     bool playing = true;
     bool ended = false;
-    uint frame_number = 0;
+    int frame_number = 0;
     while (!WindowShouldClose()) {
         if (IsKeyPressed(KEY_SPACE)) {
             playing = !playing;
@@ -201,20 +205,41 @@ int main(int argc, char **argv) {
             }
         }
 
+        const double current_time = MIN(duration, frame_number / (1.f * frame_rate));
+        const double audio_time = (double)total_frames / sample_rate;
+        const double diff = current_time - audio_time;
+        const double thresh = 1.0 / frame_rate;
+
         if (!ended && playing) {
-            if (!extract_frame(ffmpeg, buf, frame_size)) {
-                ended = true;
-            }
-            frame_number++;
-            UpdateTexture(tex, buf);
+            if (diff < -thresh) {
+                // calculate the expected frame number and skip to in
+                // this way we match video with audio as the main clock
+
+                // int expected = audio_time * frame_rate;
+                int expected = (int)round(audio_time * frame_rate); // NOTE: Optionally round to nearest integer
+                PauseAudioStream(stream);
+                for(int i = frame_number; i <= expected; i++) {
+                    if (!extract_frame(ffmpeg, buf, frame_size)) {
+                        ended = true;
+                        break;
+                    }
+                }
+                frame_number = expected;
+                ResumeAudioStream(stream);
+            } else if (diff <= thresh) { // if within threshold, render
+                // In sync → DISPLAY frame
+                if (!extract_frame(ffmpeg, buf, frame_size)) {
+                    ended = true;
+                }
+                UpdateTexture(tex, buf);
+                frame_number++;
+            } // else { do nothing }
         }
 
         BeginDrawing();
 
         DrawTexture(tex, 0, 0, WHITE);
 
-        const float current_time =
-            MIN(duration, frame_number / (1.f * frame_rate));
         const float percent = current_time / duration * 100;
 
         // draw the progress bar
