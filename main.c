@@ -198,7 +198,7 @@ int main(int argc, char **argv) {
     ffaudio = fork_and_execute(ffmpeg_audio_command, false);
 
     SetTraceLogLevel(LOG_ERROR);
-    InitWindow(width, height, FILENAME);
+    InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, FILENAME);
     SetTargetFPS(MIN(MAX_FRAME_RATE, frame_rate)); // clamp to MAX_FRAME_RATE
 
     InitAudioDevice();
@@ -212,6 +212,8 @@ int main(int argc, char **argv) {
 
     Texture tex = LoadTextureFromImage(GenImageColor(width, height, BLACK));
 
+    const int frameX = (SCREEN_WIDTH - width) / 2;
+    const int frameY = (SCREEN_HEIGHT - height) / 2;
     bool playing = true;
     bool ended = false;
     int frame_number = 0;
@@ -268,7 +270,8 @@ int main(int argc, char **argv) {
 
         BeginDrawing();
 
-        DrawTexture(tex, 0, 0, WHITE);
+        ClearBackground(BLACK);
+        DrawTexture(tex, frameX, frameY, WHITE);
 
         const float percent = current_time / duration * 100;
 
@@ -276,20 +279,21 @@ int main(int argc, char **argv) {
         const int lineThickness = 3;
         const int globRadius = 5;
         const int pad = 40;
-        const int lineHeight = height - pad;
-        DrawLineEx((Vector2){0, lineHeight}, (Vector2){width, lineHeight},
+        const int lineHeight = SCREEN_HEIGHT - pad;
+        const int lineWidth = SCREEN_WIDTH;
+        DrawLineEx((Vector2){0, lineHeight}, (Vector2){lineWidth, lineHeight},
                    lineThickness, GRAY);
         DrawLineEx((Vector2){0, lineHeight},
-                   (Vector2){width * (percent / 100), lineHeight},
+                   (Vector2){lineWidth * (percent / 100), lineHeight},
                    lineThickness, PROGRESS_RED);
-        DrawCircle(width * (percent / 100), lineHeight, globRadius,
+        DrawCircle(lineWidth * (percent / 100), lineHeight, globRadius,
                    PROGRESS_RED);
 
         const char *time = TextFormat("%s/%s", format_time(current_time),
                                       format_time(duration));
         const int textPad =
             pad + 5 + MeasureTextEx(GetFontDefault(), time, 20, 0).y;
-        DrawText(time, 10, height - textPad, 20, PROGRESS_RED);
+        DrawText(time, 10, SCREEN_HEIGHT - textPad, 20, PROGRESS_RED);
 
         EndDrawing();
     }
