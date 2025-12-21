@@ -20,7 +20,7 @@
 
 #define PROGRESS_RED GetColor(0xFF5C5CFF)
 
-const char* format_time(int seconds) {
+const char *format_time(int seconds) {
     int hours = seconds / 3600;
     int minutes = (seconds / 60) % 60;
     seconds %= 60;
@@ -125,20 +125,17 @@ int main(int argc, char **argv) {
     }
     char *const FILENAME = argv[1];
 
-    char *dimensions_command[] = {"ffprobe",
-                                  "-v",
-                                  "error",
-                                  // "-select_streams",
-                                  // "v:0",
-                                  "-show_entries",
-                                  "stream=width,height,r_frame_rate,duration,sample_rate,channels",
-                                  "-of",
-                                  "csv=p=0",
-                                  FILENAME,
-                                  NULL};
+    char *dimensions_command[] = {
+        "ffprobe", "-v", "error",
+        // "-select_streams",
+        // "v:0",
+        "-show_entries",
+        "stream=width,height,r_frame_rate,duration,sample_rate,channels", "-of",
+        "csv=p=0", FILENAME, NULL};
 
     int ffprobe = fork_and_execute(dimensions_command, true);
-    uint8_t dimension[DIMENSION_SIZE] = {0}; // expecting maximum to be 64 bytes for now
+    uint8_t dimension[DIMENSION_SIZE] = {
+        0}; // expecting maximum to be 64 bytes for now
     ssize_t n;
     if (!(n = read(ffprobe, dimension, DIMENSION_SIZE))) {
         perror("video read");
@@ -155,12 +152,13 @@ int main(int argc, char **argv) {
     frame_rate = MIN(frame_rate, MAX_FRAME_RATE);
     float duration = strtod(strtok(NULL, "\n"), NULL);
 
-    bool isAudio = true;
-    char* audio_tok = strtok(NULL, ",");
-    if (audio_tok == NULL) isAudio = false;
+    bool noAudio = false;
+    char *audio_tok = strtok(NULL, ",");
+    if (audio_tok == NULL)
+        noAudio = true;
 
     int sample_rate = 0;
-    if (isAudio) {
+    if (!noAudio) {
         sample_rate = strtol(audio_tok, NULL, 10);
         channels = strtol(strtok(NULL, ","), NULL, 10);
     }
@@ -193,9 +191,9 @@ int main(int argc, char **argv) {
 
     // audio
     char *ffmpeg_audio_command[] = {
-        "ffmpeg",  "-v",        "error",   "-loglevel", "quiet",
-        "-i",      FILENAME,    "-vn",     "-f",        "s16le",
-        "-acodec", "pcm_s16le", "-fflags", "+nobuffer", "pipe:1", NULL};
+        "ffmpeg",  "-v",        "error",  "-loglevel", "quiet",   "-i",
+        FILENAME,  "-vn",       "-f",     "s16le",     "-acodec", "pcm_s16le",
+        "-fflags", "+nobuffer", "pipe:1", NULL};
 
     ffaudio = fork_and_execute(ffmpeg_audio_command, false);
 
@@ -229,35 +227,43 @@ int main(int argc, char **argv) {
 
         const double current_time =
             MIN(duration, frame_number / (1.f * frame_rate));
-        const double audio_time = (double)total_frames / sample_rate;
-        const double diff = current_time - audio_time;
-        const double thresh = 1.0 / frame_rate;
 
         if (!ended && playing) {
-            if (diff < -thresh) {
-                // calculate the expected frame number and skip to in
-                // this way we match video with audio as the main clock
-
-                // int expected = audio_time * frame_rate;
-                // NOTE: Optionally round to nearest integer
-                int expected = (int)round(audio_time * frame_rate);
-                PauseAudioStream(stream);
-                for (int i = frame_number; i <= expected; i++) {
-                    if (!extract_frame(ffmpeg, buf, frame_size)) {
-                        ended = true;
-                        break;
-                    }
-                }
-                frame_number = expected;
-                ResumeAudioStream(stream);
-            } else if (diff <= thresh) { // if within threshold, render
-                // In sync → DISPLAY frame
+            if (noAudio) {
                 if (!extract_frame(ffmpeg, buf, frame_size)) {
                     ended = true;
                 }
                 UpdateTexture(tex, buf);
                 frame_number++;
-            } // else { do nothing }
+            } else {
+                const double audio_time = (double)total_frames / sample_rate;
+                const double diff = current_time - audio_time;
+                const double thresh = 1.0 / frame_rate;
+                if (diff < -thresh) {
+                    // calculate the expected frame number and skip to in
+                    // this way we match video with audio as the main clock
+
+                    // int expected = audio_time * frame_rate;
+                    // NOTE: Optionally round to nearest integer
+                    int expected = (int)round(audio_time * frame_rate);
+                    PauseAudioStream(stream);
+                    for (int i = frame_number; i <= expected; i++) {
+                        if (!extract_frame(ffmpeg, buf, frame_size)) {
+                            ended = true;
+                            break;
+                        }
+                    }
+                    frame_number = expected;
+                    ResumeAudioStream(stream);
+                } else if (diff <= thresh) { // if within threshold, render
+                    // In sync → DISPLAY frame
+                    if (!extract_frame(ffmpeg, buf, frame_size)) {
+                        ended = true;
+                    }
+                    UpdateTexture(tex, buf);
+                    frame_number++;
+                } // else { do nothing }
+            }
         }
 
         BeginDrawing();
@@ -279,7 +285,8 @@ int main(int argc, char **argv) {
         DrawCircle(width * (percent / 100), lineHeight, globRadius,
                    PROGRESS_RED);
 
-        const char *time = TextFormat("%s/%s", format_time(current_time), format_time(duration));
+        const char *time = TextFormat("%s/%s", format_time(current_time),
+                                      format_time(duration));
         const int textPad =
             pad + 5 + MeasureTextEx(GetFontDefault(), time, 20, 0).y;
         DrawText(time, 10, height - textPad, 20, PROGRESS_RED);
