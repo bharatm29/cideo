@@ -1,6 +1,5 @@
 #include <math.h>
 #include <raylib.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -91,7 +90,7 @@ int fork_and_execute(char **command, bool wait) {
 int get_frame_rate(char *fstr) {
     char *cur = fstr;
 
-    // since frame rate comes in format like: 24000/1001 =>
+    // since frame rate comes in format like: 24000/1001
     int a = 0;
     int b = 0;
 
@@ -119,11 +118,15 @@ void AudioInputCallback(void *buffer, unsigned int frames) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2) {
+    if (argc < 2) {
         printf("cideo [FILE]\n");
         exit(EXIT_FAILURE);
     }
     char *const FILENAME = argv[1];
+    if (fopen(FILENAME, "rb") == NULL) {
+        perror("Couldn't open file");
+        exit(EXIT_FAILURE);
+    }
 
     char *dimensions_command[] = {
         "ffprobe", "-v", "error",
@@ -134,8 +137,7 @@ int main(int argc, char **argv) {
         "csv=p=0", FILENAME, NULL};
 
     int ffprobe = fork_and_execute(dimensions_command, true);
-    uint8_t dimension[DIMENSION_SIZE] = {
-        0}; // expecting maximum to be 64 bytes for now
+    uint8_t dimension[DIMENSION_SIZE] = {0};
     ssize_t n;
     if (!(n = read(ffprobe, dimension, DIMENSION_SIZE))) {
         perror("video read");
@@ -145,7 +147,7 @@ int main(int argc, char **argv) {
 
     dimension[n - 1] = '\0'; // dimension[n] will be a \n, thus we skip that
 
-    // format:- 1920,1200,60/1,29.699995
+    // format[video]:- 1920,1200,60/1,29.699995
     int width = strtol(strtok((char *)dimension, ","), NULL, 10);
     int height = strtol(strtok(NULL, ","), NULL, 10);
     int frame_rate = get_frame_rate(strtok(NULL, ","));
@@ -157,6 +159,8 @@ int main(int argc, char **argv) {
     if (audio_tok == NULL)
         noAudio = true;
 
+    // format[audio]:- 44100,2,60/1,29.699995 (last are repeat thus we skip
+    // them)
     int sample_rate = 0;
     if (!noAudio) {
         sample_rate = strtol(audio_tok, NULL, 10);
@@ -190,12 +194,15 @@ int main(int argc, char **argv) {
     uint8_t *buf = malloc(sizeof(uint8_t) * frame_size);
 
     // audio
-    char *ffmpeg_audio_command[] = {
-        "ffmpeg",  "-v",        "error",  "-loglevel", "quiet",   "-i",
-        FILENAME,  "-vn",       "-f",     "s16le",     "-acodec", "pcm_s16le",
-        "-fflags", "+nobuffer", "pipe:1", NULL};
+    if (!noAudio) {
+        char *ffmpeg_audio_command[] = {
+            "ffmpeg",  "-v",        "error",   "-loglevel",
+            "quiet",   "-i",        FILENAME,  "-vn",
+            "-f",      "s16le",     "-acodec", "pcm_s16le",
+            "-fflags", "+nobuffer", "pipe:1",  NULL};
 
-    ffaudio = fork_and_execute(ffmpeg_audio_command, false);
+        ffaudio = fork_and_execute(ffmpeg_audio_command, false);
+    }
 
     SetTraceLogLevel(LOG_ERROR);
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, FILENAME);
@@ -205,12 +212,19 @@ int main(int argc, char **argv) {
 
     SetAudioStreamBufferSizeDefault(MAX_SAMPLES_PER_UPDATE);
 
-    AudioStream stream = LoadAudioStream(sample_rate, 16, channels);
-    SetAudioStreamCallback(stream, AudioInputCallback);
-    SetAudioStreamVolume(stream, 0.5f);
-    PlayAudioStream(stream);
+    AudioStream stream = {0};
+
+    if (!noAudio) {
+        stream = LoadAudioStream(sample_rate, 16, channels);
+        SetAudioStreamCallback(stream, AudioInputCallback);
+        SetAudioStreamVolume(stream, 0.5f);
+        PlayAudioStream(stream);
+    }
 
     Texture tex = LoadTextureFromImage(GenImageColor(width, height, BLACK));
+
+    char formatted_duration[8] = {0};
+    strcpy(formatted_duration, format_time(duration));
 
     const int frameX = (SCREEN_WIDTH - width) / 2;
     const int frameY = (SCREEN_HEIGHT - height) / 2;
@@ -220,11 +234,15 @@ int main(int argc, char **argv) {
     while (!WindowShouldClose()) {
         if (IsKeyPressed(KEY_SPACE)) {
             playing = !playing;
-            if (playing) {
-                ResumeAudioStream(stream);
-            } else {
+            if (!playing) {
                 PauseAudioStream(stream);
+            } else {
+                ResumeAudioStream(stream);
             }
+        }
+
+        if (ended && !noAudio) {
+            StopAudioStream(stream);
         }
 
         const double current_time =
@@ -258,7 +276,6 @@ int main(int argc, char **argv) {
                     frame_number = expected;
                     ResumeAudioStream(stream);
                 } else if (diff <= thresh) { // if within threshold, render
-                    // In sync → DISPLAY frame
                     if (!extract_frame(ffmpeg, buf, frame_size)) {
                         ended = true;
                     }
@@ -284,13 +301,13 @@ int main(int argc, char **argv) {
         DrawLineEx((Vector2){0, lineHeight}, (Vector2){lineWidth, lineHeight},
                    lineThickness, GRAY);
         DrawLineEx((Vector2){0, lineHeight},
-                   (Vector2){lineWidth * (percent / 100), lineHeight},
+                   (Vector2){lineWidth * (percent / 100.f), lineHeight},
                    lineThickness, PROGRESS_RED);
         DrawCircle(lineWidth * (percent / 100), lineHeight, globRadius,
                    PROGRESS_RED);
 
-        const char *time = TextFormat("%s/%s", format_time(current_time),
-                                      format_time(duration));
+        const char *time =
+            TextFormat("%s/%s", format_time(current_time), formatted_duration);
         const int textPad =
             pad + 5 + MeasureTextEx(GetFontDefault(), time, 20, 0).y;
         DrawText(time, 10, SCREEN_HEIGHT - textPad, 20, PROGRESS_RED);
