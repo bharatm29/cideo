@@ -13,6 +13,7 @@
 #define SCREEN_HEIGHT 1200
 #define MAX_FRAME_RATE 60
 #define MAX_SAMPLES_PER_UPDATE 4096
+#define DIMENSION_SIZE 128
 
 // using s16le which is 2 byte per sample
 #define bytePerSample 2
@@ -127,20 +128,20 @@ int main(int argc, char **argv) {
     char *dimensions_command[] = {"ffprobe",
                                   "-v",
                                   "error",
-                                  "-select_streams",
-                                  "v:0",
+                                  // "-select_streams",
+                                  // "v:0",
                                   "-show_entries",
-                                  "stream=width,height,r_frame_rate,duration",
+                                  "stream=width,height,r_frame_rate,duration,sample_rate,channels",
                                   "-of",
                                   "csv=p=0",
                                   FILENAME,
                                   NULL};
 
     int ffprobe = fork_and_execute(dimensions_command, true);
-    uint8_t dimension[64] = {0}; // expecting maximum to be 64 bytes for now
+    uint8_t dimension[DIMENSION_SIZE] = {0}; // expecting maximum to be 64 bytes for now
     ssize_t n;
-    if (!(n = read(ffprobe, dimension, 64))) {
-        perror("read");
+    if (!(n = read(ffprobe, dimension, DIMENSION_SIZE))) {
+        perror("video read");
         exit(EXIT_FAILURE);
     }
     close(ffprobe);
@@ -152,7 +153,17 @@ int main(int argc, char **argv) {
     int height = strtol(strtok(NULL, ","), NULL, 10);
     int frame_rate = get_frame_rate(strtok(NULL, ","));
     frame_rate = MIN(frame_rate, MAX_FRAME_RATE);
-    float duration = strtod(strtok(NULL, ","), NULL);
+    float duration = strtod(strtok(NULL, "\n"), NULL);
+
+    bool isAudio = true;
+    char* audio_tok = strtok(NULL, ",");
+    if (audio_tok == NULL) isAudio = false;
+
+    int sample_rate = 0;
+    if (isAudio) {
+        sample_rate = strtol(audio_tok, NULL, 10);
+        channels = strtol(strtok(NULL, ","), NULL, 10);
+    }
 
     // clamp width to fit to screen
     float scaleFactor =
@@ -180,36 +191,11 @@ int main(int argc, char **argv) {
     size_t frame_size = (1LL * width * height * 4);
     uint8_t *buf = malloc(sizeof(uint8_t) * frame_size);
 
-    char *audio_dimensions_command[] = {"ffprobe",
-                                        "-v",
-                                        "error",
-                                        "-select_streams",
-                                        "a",
-                                        "-show_entries",
-                                        "stream=sample_rate,channels",
-                                        "-of",
-                                        "csv=p=0",
-                                        FILENAME,
-                                        NULL};
-
-    ffprobe = fork_and_execute(audio_dimensions_command, true);
-
-    uint8_t audio_dimension[64] = {0};
-    if (!(n = read(ffprobe, audio_dimension, 64))) {
-        perror("read");
-        exit(EXIT_FAILURE);
-    }
-    close(ffprobe);
-    audio_dimension[n - 1] = '\0';
-
     // audio
-    int sample_rate = strtol(strtok((char *)audio_dimension, ","), NULL, 10);
-    channels = strtol(strtok(NULL, ","), NULL, 10);
-
     char *ffmpeg_audio_command[] = {
         "ffmpeg",  "-v",        "error",   "-loglevel", "quiet",
         "-i",      FILENAME,    "-vn",     "-f",        "s16le",
-        "-acodec", "pcm_s16le", "-fflags", "+nobuffer", "pipe:1"};
+        "-acodec", "pcm_s16le", "-fflags", "+nobuffer", "pipe:1", NULL};
 
     ffaudio = fork_and_execute(ffmpeg_audio_command, false);
 
