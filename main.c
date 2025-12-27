@@ -1,3 +1,4 @@
+#include "./avcodec.c"
 #include <math.h>
 #include <raylib.h>
 #include <stdio.h>
@@ -8,10 +9,7 @@
 
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
-#define SCREEN_WIDTH 1920
-#define SCREEN_HEIGHT 1200
 #define MAX_FRAME_RATE 60
-#define MAX_SAMPLES_PER_UPDATE 4096
 #define DIMENSION_SIZE 128
 
 // using s16le which is 2 byte per sample
@@ -128,58 +126,19 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
-    char *dimensions_command[] = {
-        "ffprobe", "-v", "error",
-        // "-select_streams",
-        // "v:0",
-        "-show_entries",
-        "stream=width,height,r_frame_rate,duration,sample_rate,channels", "-of",
-        "csv=p=0", FILENAME, NULL};
+    setup_avcodec(FILENAME);
 
-    int ffprobe = fork_and_execute(dimensions_command, true);
-    uint8_t dimension[DIMENSION_SIZE] = {0};
-    ssize_t n;
-    if (!(n = read(ffprobe, dimension, DIMENSION_SIZE))) {
-        perror("video read");
-        exit(EXIT_FAILURE);
-    }
-    close(ffprobe);
+    int width = rgba->width;
+    int height = rgba->height;
+    AVRational framerate = video_stream->r_frame_rate;
+    int frame_rate = ceil((float)framerate.num / framerate.den);
+    float duration = (float)fmt_ctx->duration / AV_TIME_BASE;
 
-    dimension[n - 1] = '\0'; // dimension[n] will be a \n, thus we skip that
-
-    // format[video]:- 1920,1200,60/1,29.699995
-    int width = strtol(strtok((char *)dimension, ","), NULL, 10);
-    int height = strtol(strtok(NULL, ","), NULL, 10);
-    int frame_rate = get_frame_rate(strtok(NULL, ","));
-    frame_rate = MIN(frame_rate, MAX_FRAME_RATE);
-    float duration = strtod(strtok(NULL, "\n"), NULL);
-
-    bool noAudio = false;
-    char *audio_tok = strtok(NULL, ",");
-    if (audio_tok == NULL)
-        noAudio = true;
-
-    // format[audio]:- 44100,2,60/1,29.699995 (last are repeat thus we skip
-    // them)
     int sample_rate = 0;
     if (!noAudio) {
-        sample_rate = strtol(audio_tok, NULL, 10);
-        channels = strtol(strtok(NULL, ","), NULL, 10);
+        channels = audio_dec_ctx->ch_layout.nb_channels;
+        sample_rate = audio_dec_ctx->sample_rate;
     }
-
-    // clamp width to fit to screen
-    float scaleFactor =
-        MIN((float)SCREEN_WIDTH / width, (float)SCREEN_HEIGHT / height);
-
-    // NOTE: following allows cropping to fill screen without keeping aspect
-    // ratio
-    // width = MIN(SCREEN_WIDTH, width * SCREEN_HEIGHT / height);
-    // height = MIN(SCREEN_HEIGHT, height * SCREEN_WIDTH / width);
-
-    // scales it to ensure it fits in screen width and height while keeping
-    // aspect ratio
-    width *= scaleFactor;
-    height *= scaleFactor;
 
     const char *scale =
         TextFormat("fps=%d,scale=%d:%d", frame_rate, width, height);
@@ -210,7 +169,7 @@ int main(int argc, char **argv) {
 
     InitAudioDevice();
 
-    SetAudioStreamBufferSizeDefault(MAX_SAMPLES_PER_UPDATE);
+    SetAudioStreamBufferSizeDefault(audio_dec_ctx->frame_size);
 
     AudioStream stream = {0};
 
@@ -322,4 +281,5 @@ int main(int argc, char **argv) {
     UnloadAudioStream(stream);
     CloseAudioDevice();
     CloseWindow();
+    cleanup();
 }

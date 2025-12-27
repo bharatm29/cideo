@@ -7,13 +7,9 @@
 #include <libavutil/timestamp.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-
-/*
- * channels -> audio_dec_ctx->ch_layout.nb_channels
- * sample_rate -> audio_dec_ctx->sample_rate
- */
 
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
@@ -35,10 +31,11 @@ static int rgba_bufsize;
 
 static int video_stream_idx = -1, audio_stream_idx = -1;
 static AVFrame *frame = NULL;
-static AVFrame *rgba = NULL;
+static AVFrame *rgba = NULL; // FIXME: please change name of this thing
 static AVPacket *pkt = NULL;
 static int video_frame_count = 0;
 static int audio_frame_count = 0;
+static bool noAudio = false;
 
 static struct SwsContext *sws = NULL;
 static struct SwrContext *swr = NULL;
@@ -266,7 +263,8 @@ void read_frame() {
     }
 }
 
-int setup(const char *src_filename) {
+int setup_avcodec(const char *filename) {
+    src_filename = filename;
     int ret = 0;
 
     /* open input file, and allocate format context */
@@ -299,19 +297,20 @@ int setup(const char *src_filename) {
         video_bufsize = ret;
     }
 
-    // audio
-    if (open_codec_context(&audio_stream_idx, &audio_dec_ctx, fmt_ctx,
-                           AVMEDIA_TYPE_AUDIO) >= 0) {
-        audio_stream = fmt_ctx->streams[audio_stream_idx];
-    }
-
-    if (!audio_stream && !video_stream) {
-        fprintf(
-            stderr,
-            "Could not find audio or video stream in the input, aborting\n");
+    if (!video_stream) {
+        fprintf(stderr, "Could not find video stream in the input, aborting\n");
         ret = 1;
         cleanup();
         exit(ret);
+    }
+
+    // audio
+    ret = open_codec_context(&audio_stream_idx, &audio_dec_ctx, fmt_ctx,
+                             AVMEDIA_TYPE_AUDIO);
+    if (ret >= 0) {
+        audio_stream = fmt_ctx->streams[audio_stream_idx];
+    } else {
+        noAudio = true;
     }
 
     frame = av_frame_alloc();
@@ -346,22 +345,24 @@ int setup(const char *src_filename) {
                          video_dec_ctx->pix_fmt, scaledW, scaledH,
                          AV_PIX_FMT_RGBA, SWS_BILINEAR, NULL, NULL, NULL);
 
-    AVChannelLayout in_ch_layout;
-    av_channel_layout_copy(&in_ch_layout, &audio_dec_ctx->ch_layout);
+    if (!noAudio) {
+        AVChannelLayout in_ch_layout;
+        av_channel_layout_copy(&in_ch_layout, &audio_dec_ctx->ch_layout);
 
-    AVChannelLayout out_ch_layout;
-    av_channel_layout_copy(&out_ch_layout, &audio_dec_ctx->ch_layout);
+        AVChannelLayout out_ch_layout;
+        av_channel_layout_copy(&out_ch_layout, &audio_dec_ctx->ch_layout);
 
-    // we will be converting AV_SAMPLE_FMT_FLTP into AV_SAMPLE_FMT_S16
-    swr_alloc_set_opts2(&swr, &out_ch_layout, AV_SAMPLE_FMT_S16,
-                        audio_dec_ctx->sample_rate, &in_ch_layout,
-                        audio_dec_ctx->sample_fmt, audio_dec_ctx->sample_rate,
-                        0, NULL);
+        // we will be converting AV_SAMPLE_FMT_FLTP into AV_SAMPLE_FMT_S16
+        swr_alloc_set_opts2(&swr, &out_ch_layout, AV_SAMPLE_FMT_S16,
+                            audio_dec_ctx->sample_rate, &in_ch_layout,
+                            audio_dec_ctx->sample_fmt,
+                            audio_dec_ctx->sample_rate, 0, NULL);
 
-    if (!swr || (ret = swr_init(swr)) < 0) {
-        fprintf(stderr, "Failed to initialize SWR context\n");
-        cleanup();
-        exit(ret);
+        if (!swr || (ret = swr_init(swr)) < 0) {
+            fprintf(stderr, "Failed to initialize SWR context\n");
+            cleanup();
+            exit(ret);
+        }
     }
 
     pkt = av_packet_alloc();
@@ -372,13 +373,15 @@ int setup(const char *src_filename) {
         exit(ret);
     }
 
-    // output buffer
-    audio_output_buffer =
-        malloc(sizeof(uint16_t) * (audio_dec_ctx->frame_size *
-                                   audio_dec_ctx->ch_layout.nb_channels));
-    if (!audio_output_buffer) {
-        fprintf(stderr, "Failed to allocate audio output buffer\n");
-        return -1;
+    if (!noAudio) {
+        // output buffer
+        audio_output_buffer =
+            malloc(sizeof(uint16_t) * (audio_dec_ctx->frame_size *
+                                       audio_dec_ctx->ch_layout.nb_channels));
+        if (!audio_output_buffer) {
+            fprintf(stderr, "Failed to allocate audio output buffer\n");
+            return -1;
+        }
     }
 
     return ret;
