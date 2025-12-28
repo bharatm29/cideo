@@ -10,12 +10,15 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
 #define SCREEN_WIDTH 1920
 #define SCREEN_HEIGHT 1200
 
+static float pts = 0.f;
+static int audio_fd = -1;
 static AVFormatContext *fmt_ctx = NULL;
 static AVCodecContext *video_dec_ctx = NULL, *audio_dec_ctx;
 static int width, height;
@@ -36,37 +39,10 @@ static AVPacket *pkt = NULL;
 static int video_frame_count = 0;
 static int audio_frame_count = 0;
 static bool noAudio = false;
+static bool ended = false;
 
 static struct SwsContext *sws = NULL;
 static struct SwrContext *swr = NULL;
-
-static int output_video_frame(AVFrame *frame) {
-    if (frame->width != width || frame->height != height ||
-        frame->format != pix_fmt) {
-        /* To handle this change, one could call av_image_alloc again and
-         * decode the following frames into another rawvideo file. */
-        fprintf(stderr,
-                "Error: Width, height and pixel format have to be "
-                "constant in a rawvideo file, but the width, height or "
-                "pixel format of the input video changed:\n"
-                "old: width = %d, height = %d, format = %s\n"
-                "new: width = %d, height = %d, format = %s\n",
-                width, height, av_get_pix_fmt_name(pix_fmt), frame->width,
-                frame->height, av_get_pix_fmt_name(frame->format));
-        return -1;
-    }
-
-    printf("video_frame n:%d\n", video_frame_count++);
-
-    /* copy decoded frame to destination buffer:
-     * this is required since rawvideo expects non aligned data */
-    av_image_copy2(video_dst_data, video_dst_linesize, frame->data,
-                   frame->linesize, pix_fmt, width, height);
-
-    /* write to rawvideo file */
-    // fwrite(video_dst_data[0], 1, video_dst_bufsize, video_dst_file);
-    return 0;
-}
 
 static int submit_audio_packet(AVCodecContext *dec, const AVPacket *pkt) {
     int ret = 0;
@@ -74,46 +50,96 @@ static int submit_audio_packet(AVCodecContext *dec, const AVPacket *pkt) {
     // submit the packet to the decoder
     ret = avcodec_send_packet(dec, pkt);
     if (ret < 0) {
-        fprintf(stderr, "Error submitting a packet for decoding (%s)\n",
+        fprintf(stderr, "Error submitting a audio packet for decoding (%s)\n",
                 av_err2str(ret));
     }
 
     return ret;
 }
 
-static int decode_audio_packet(AVCodecContext *dec) {
-    int ret;
-    do {
-        ret = avcodec_receive_frame(dec, frame);
-        if (ret < 0 && !(ret == AVERROR_EOF || ret == AVERROR(EAGAIN))) {
-            fprintf(stderr, "Error during audio decoding (%s)\n",
-                    av_err2str(ret));
-            return ret;
-        }
-    } while (ret == AVERROR_EOF || ret == AVERROR(EAGAIN));
-
-    // size_t unpadded_linesize = frame->nb_samples *
-    // av_get_bytes_per_sample(frame->format); fwrite(frame->extended_data[0],
-    // 1, unpadded_linesize, file); for what tho?
-
-    // FIXME: check if planar or not! =>
-    // https://github.com/FFmpeg/FFmpeg/blob/master/doc/examples/demux_decode.c#L344
-
-    if (audio_dec_ctx->sample_fmt == AV_SAMPLE_FMT_FLTP) {
-        int nb_samples = frame->nb_samples;
-        int channels = audio_dec_ctx->ch_layout.nb_channels;
-
-        uint8_t *out[] = {
-            (uint8_t *)audio_output_buffer}; // same as (uint8_t**)&outputBuffer
-                                             // but cleaner?
-        int out_samples = swr_convert(swr, out, frame->nb_samples,
-                                      (const uint8_t **)frame->extended_data,
-                                      frame->nb_samples);
-
-        // size:- out_samples * channels
+static int decode_audio_packet2(int fd, AVCodecContext *dec, AVPacket *pkt)
+{
+    int ret = avcodec_send_packet(dec, pkt);
+    if (ret < 0 && ret != AVERROR(EAGAIN)) {
+        fprintf(stderr, "send_packet failed (%s)\n", av_err2str(ret));
+        return ret;
     }
 
-    av_frame_unref(frame);
+    while (1) {
+        ret = avcodec_receive_frame(dec, frame);
+
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+            return 0;
+
+        if (ret < 0) {
+            fprintf(stderr, "receive_frame failed (%s)\n", av_err2str(ret));
+            return ret;
+        }
+
+        int channels = dec->ch_layout.nb_channels;
+
+        uint8_t *out[] = { (uint8_t *)audio_output_buffer };
+
+        int out_samples = swr_convert(
+            swr,
+            out,
+            frame->nb_samples,
+            (const uint8_t **)frame->extended_data,
+            frame->nb_samples
+        );
+
+        if (out_samples > 0) {
+            int bytes = out_samples * channels * 2;
+            write(fd, audio_output_buffer, bytes);
+        }
+
+        av_frame_unref(frame);
+    }
+}
+
+static int decode_audio_packet(int fd, AVCodecContext *dec) {
+    int ret;
+    while (1) {
+        ret = avcodec_receive_frame(dec, frame);
+
+        if (ret == AVERROR(EAGAIN))
+            return 0;
+
+        if (ret == AVERROR_EOF) {
+            return 0;
+        }
+
+        if (ret < 0) {
+            fprintf(stderr, "receive_frame failed (%s)\n", av_err2str(ret));
+            return ret;
+        }
+
+        // size_t unpadded_linesize = frame->nb_samples *
+        // av_get_bytes_per_sample(frame->format); fwrite(frame->extended_data[0],
+        // 1, unpadded_linesize, file); for what tho?
+
+        // FIXME: check if planar or not! =>
+        // https://github.com/FFmpeg/FFmpeg/blob/master/doc/examples/demux_decode.c#L344
+
+        if (audio_dec_ctx->sample_fmt == AV_SAMPLE_FMT_FLTP) {
+            int nb_samples = frame->nb_samples;
+            int channels = audio_dec_ctx->ch_layout.nb_channels;
+
+            uint8_t *out[] = {
+                (uint8_t *)audio_output_buffer}; // same as (uint8_t**)&outputBuffer
+            // but cleaner?
+            int out_samples = swr_convert(swr, out, frame->nb_samples,
+                                          (const uint8_t **)frame->extended_data,
+                                          frame->nb_samples);
+
+            int bytes = out_samples * channels * 2;
+            if (bytes > 0) {
+                write(fd, audio_output_buffer, bytes);
+            }
+        }
+
+        av_frame_unref(frame);
+    }
     return ret;
 }
 
@@ -123,30 +149,37 @@ static int decode_video_packet(AVCodecContext *dec, const AVPacket *pkt) {
     // submit the packet to the decoder
     ret = avcodec_send_packet(dec, pkt);
     if (ret < 0) {
-        fprintf(stderr, "Error submitting a packet for decoding (%s)\n",
+        fprintf(stderr, "Error submitting a video packet for decoding (%s)\n",
                 av_err2str(ret));
         return ret;
     }
 
-    // get next available frame from the decoder
-    do {
+    while (true) {
         ret = avcodec_receive_frame(dec, frame);
-        if (ret < 0 && !(ret == AVERROR_EOF || ret == AVERROR(EAGAIN))) {
-            fprintf(stderr, "Error during video decoding (%s)\n",
-                    av_err2str(ret));
+
+        if (ret == AVERROR(EAGAIN))
+            return 0;
+
+        if (ret == AVERROR_EOF) {
+            ended = true;
+            return 0;
+        }
+
+        if (ret < 0) {
+            fprintf(stderr, "receive_frame failed (%s)\n", av_err2str(ret));
             return ret;
         }
-    } while (ret == AVERROR_EOF || ret == AVERROR(EAGAIN));
 
-    sws_scale(sws, (const uint8_t *const *)frame->data, frame->linesize, 0,
-              frame->height, rgba->data, rgba->linesize);
+        sws_scale(sws, (const uint8_t *const *)frame->data, frame->linesize, 0,
+                  frame->height, rgba->data, rgba->linesize);
 
-    av_image_copy2(video_dst_data, video_dst_linesize, rgba->data,
-                   rgba->linesize, AV_PIX_FMT_RGBA, rgba->width, rgba->height);
+        // av_image_copy2(video_dst_data, video_dst_linesize, rgba->data, rgba->linesize, AV_PIX_FMT_RGBA, rgba->width, rgba->height);
 
-    // read from video_dst_data[0]
+        pts = (double)frame->pts * video_stream->time_base.num / video_stream->time_base.den;
+        av_frame_unref(frame);
 
-    av_frame_unref(frame);
+        break;
+    }
 
     return ret;
 }
@@ -239,28 +272,27 @@ static int get_format_from_sample_fmt(const char **fmt,
     return -1;
 }
 
-void read_frame() {
+int read_frame() {
     int ret;
     /* read frames from the file */
-    while (av_read_frame(fmt_ctx, pkt) >= 0) {
+    if (av_read_frame(fmt_ctx, pkt) >= 0) {
         // check if the packet belongs to a stream we are interested in,
         // otherwise skip it
         if (pkt->stream_index == video_stream_idx) {
             // decode immediately to get the frame
             ret = decode_video_packet(video_dec_ctx, pkt);
-            break;
         } else if (pkt->stream_index == audio_stream_idx) {
-            ret = submit_audio_packet(audio_dec_ctx, pkt); // only submit
-            break;
+            ret = decode_audio_packet2(audio_fd, audio_dec_ctx, pkt); // only submit
         }
 
         av_packet_unref(pkt);
 
         if (ret < 0) {
             fprintf(stderr, "Error decoding packet\n");
-            break;
         }
     }
+
+    return ret;
 }
 
 int setup_avcodec(const char *filename) {

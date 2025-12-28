@@ -10,12 +10,12 @@
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
 #define MAX_FRAME_RATE 60
-#define DIMENSION_SIZE 128
+#define PROGRESS_RED GetColor(0xFF5C5CFF)
 
 // using s16le which is 2 byte per sample
 #define bytePerSample 2
 
-#define PROGRESS_RED GetColor(0xFF5C5CFF)
+static size_t frame_size;
 
 const char *format_time(int seconds) {
     int hours = seconds / 3600;
@@ -32,17 +32,20 @@ const char *format_time(int seconds) {
 typedef unsigned char uint8_t; // #include <stdint.h>
 
 // modifies buf
-ssize_t extract_frame(int fd, uint8_t *buf, size_t frame_size) {
-    size_t total = 0;
-    while (total < frame_size) {
-        ssize_t n = read(fd, buf + total, frame_size - total);
-        if (n <= 0) {
-            return n; // EOF
-        }
-        total += n;
-    }
-    // printf("read: %lu\n", total);
-    return total;
+int extract_frame(int fd, uint8_t *buf, size_t frame_size) {
+    // size_t total = 0;
+    // while (total < frame_size) {
+    //     ssize_t n = read(fd, buf + total, frame_size - total);
+    //     if (n <= 0) {
+    //         return n; // EOF
+    //     }
+    //     total += n;
+    // }
+    // // printf("read: %lu\n", total);
+    // return total;
+    int ret = read_frame();
+    // memcpy(buf, rgba->data[0], frame_size); // FIXME: unnecessary copy use rgba->data[0] directly
+    return ret;
 }
 
 int fork_and_execute(char **command, bool wait) {
@@ -83,24 +86,6 @@ int fork_and_execute(char **command, bool wait) {
     }
 
     return fd[0];
-}
-
-int get_frame_rate(char *fstr) {
-    char *cur = fstr;
-
-    // since frame rate comes in format like: 24000/1001
-    int a = 0;
-    int b = 0;
-
-    while (*cur != '/') {
-        cur++;
-    }
-
-    *cur = '\0';
-    a = strtol(fstr, NULL, 10);
-    b = strtol(++cur, NULL, 10);
-
-    return ceil(a / (1.f * b));
 }
 
 int ffaudio;  // lateinit in @main
@@ -149,7 +134,7 @@ int main(int argc, char **argv) {
         "rgba",   "-fflags", "+nobuffer",   "pipe:1",    NULL};
 
     int ffmpeg = fork_and_execute(ffmpeg_command, false);
-    size_t frame_size = (1LL * width * height * 4);
+    frame_size = (1LL * width * height * 4);
     uint8_t *buf = malloc(sizeof(uint8_t) * frame_size);
 
     // audio
@@ -169,7 +154,7 @@ int main(int argc, char **argv) {
 
     InitAudioDevice();
 
-    SetAudioStreamBufferSizeDefault(audio_dec_ctx->frame_size);
+    SetAudioStreamBufferSizeDefault(4096);
 
     AudioStream stream = {0};
 
@@ -188,7 +173,6 @@ int main(int argc, char **argv) {
     const int frameX = (SCREEN_WIDTH - width) / 2;
     const int frameY = (SCREEN_HEIGHT - height) / 2;
     bool playing = true;
-    bool ended = false;
     int frame_number = 0;
     while (!WindowShouldClose()) {
         if (IsKeyPressed(KEY_SPACE)) {
@@ -209,36 +193,29 @@ int main(int argc, char **argv) {
 
         if (!ended && playing) {
             if (noAudio) {
-                if (!extract_frame(ffmpeg, buf, frame_size)) {
-                    ended = true;
-                }
-                UpdateTexture(tex, buf);
+                extract_frame(ffmpeg, buf, frame_size);
+                UpdateTexture(tex, rgba->data[0]);
                 frame_number++;
             } else {
                 const double audio_time = (double)total_frames / sample_rate;
-                const double diff = current_time - audio_time;
-                const double thresh = 1.0 / frame_rate;
+                const double diff = pts - audio_time;
+                const double thresh = 3.0 / frame_rate;
                 if (diff < -thresh) {
                     // calculate the expected frame number and skip to in
                     // this way we match video with audio as the main clock
 
                     // int expected = audio_time * frame_rate;
                     // NOTE: Optionally round to nearest integer
-                    int expected = (int)round(audio_time * frame_rate);
+                    int expected = (int)(audio_time * frame_rate);
                     PauseAudioStream(stream);
-                    for (int i = frame_number; i <= expected; i++) {
-                        if (!extract_frame(ffmpeg, buf, frame_size)) {
-                            ended = true;
-                            break;
-                        }
+                    for (int i = frame_number; i < expected; i++) {
+                        extract_frame(ffmpeg, buf, frame_size);
                     }
                     frame_number = expected;
                     ResumeAudioStream(stream);
                 } else if (diff <= thresh) { // if within threshold, render
-                    if (!extract_frame(ffmpeg, buf, frame_size)) {
-                        ended = true;
-                    }
-                    UpdateTexture(tex, buf);
+                    extract_frame(ffmpeg, buf, frame_size);
+                    UpdateTexture(tex, rgba->data[0]);
                     frame_number++;
                 } // else { do nothing }
             }
@@ -276,6 +253,7 @@ int main(int argc, char **argv) {
 
     free(buf);
     close(ffaudio);
+    close(audio_fd);
     close(ffmpeg);
     UnloadTexture(tex);
     UnloadAudioStream(stream);
