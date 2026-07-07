@@ -9,7 +9,7 @@
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
 #define SCREEN_WIDTH 1920
-#define SCREEN_HEIGHT 1200
+#define SCREEN_HEIGHT 1080
 #define MAX_FRAME_RATE 60
 #define MAX_SAMPLES_PER_UPDATE 4096
 #define DIMENSION_SIZE 128
